@@ -1,0 +1,38 @@
+name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches:
+      - feature/friendly-file-id
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      deployments: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare static files
+        run: |
+          rm -rf publish
+          mkdir -p publish
+          rsync -av \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='README.md' \
+            ./ publish/
+
+      - name: Deploy to Cloudflare zyzhoubox
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN_ZYZHOUBOX }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID_ZYZHOUBOX }}
+          command: pages deploy publish --project-name=${{ secrets.CF_PROJECT_NAME_ZYZHOUBOX }} --branch=${{ github.ref_name }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
