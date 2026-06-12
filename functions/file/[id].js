@@ -1,17 +1,66 @@
 const FRIENDLY_FILE_ID_SEPARATOR = "~tg~";
 
+function decodePathValue(value = "") {
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return value;
+    }
+}
+
 function stripExtension(value = "") {
     const dotIndex = value.lastIndexOf(".");
     return dotIndex > 0 ? value.slice(0, dotIndex) : value;
 }
 
 function parseTelegramFileId(pathname = "", paramId = "") {
-    const rawId = decodeURIComponent(paramId || pathname.split("/").filter(Boolean).pop() || "");
+    const rawId = decodePathValue(paramId || pathname.split("/").filter(Boolean).pop() || "");
     const idWithoutExtension = stripExtension(rawId);
     const separatorIndex = idWithoutExtension.lastIndexOf(FRIENDLY_FILE_ID_SEPARATOR);
     return separatorIndex >= 0
         ? idWithoutExtension.slice(separatorIndex + FRIENDLY_FILE_ID_SEPARATOR.length)
         : idWithoutExtension;
+}
+
+function sanitizeFileName(value = "") {
+    const fileName = String(value)
+        .replace(/[\\/\u0000-\u001f\u007f"]/g, "_")
+        .replace(/^\.+$/g, "")
+        .slice(0, 180);
+    return fileName || null;
+}
+
+function friendlyDownloadFileName(pathname = "", paramId = "") {
+    const rawId = decodePathValue(paramId || pathname.split("/").filter(Boolean).pop() || "");
+    const idWithoutExtension = stripExtension(rawId);
+    const separatorIndex = idWithoutExtension.lastIndexOf(FRIENDLY_FILE_ID_SEPARATOR);
+    if (separatorIndex <= 0) return null;
+
+    const slug = idWithoutExtension.slice(0, separatorIndex);
+    const extension = rawId.slice(idWithoutExtension.length);
+    return sanitizeFileName(slug + extension);
+}
+
+function contentDispositionHeader(response, fileName) {
+    if (!fileName) return null;
+    const current = response.headers.get("Content-Disposition") || "";
+    const dispositionType = current.split(";")[0].trim().toLowerCase() || "inline";
+    const safeType = /^[a-z]+$/.test(dispositionType) ? dispositionType : "inline";
+    const asciiName = fileName.replace(/[^\x20-\x7e]/g, "_").replace(/\\/g, "\\\\").replace(/"/g, "_");
+    return safeType + `; filename="${asciiName}"; filename*=UTF-8''` + encodeURIComponent(fileName);
+}
+
+function withFriendlyDownloadName(response, fileName) {
+    const disposition = contentDispositionHeader(response, fileName);
+    if (!disposition) return response;
+
+    const headers = new Headers(response.headers);
+    headers.set("Content-Disposition", disposition);
+    return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+    });
 }
 
 export async function onRequest(context) {
@@ -23,6 +72,7 @@ export async function onRequest(context) {
 
     const url = new URL(request.url);
     const telegramFileId = parseTelegramFileId(url.pathname, params.id);
+    const downloadFileName = friendlyDownloadFileName(url.pathname, params.id);
     let fileUrl = 'https://telegra.ph/' + url.pathname + url.search
     if (url.pathname.length > 39) { // Path length > 39 indicates file uploaded via Telegram Bot API
         console.log(telegramFileId)
@@ -42,17 +92,18 @@ export async function onRequest(context) {
 
     // Log response details
     console.log(response.ok, response.status);
+    const fileResponse = withFriendlyDownloadName(response, downloadFileName);
 
     // Allow the admin page to directly view the image
     const isAdmin = request.headers.get('Referer')?.includes(`${url.origin}/admin`);
     if (isAdmin) {
-        return response;
+        return fileResponse;
     }
 
     // Check if KV storage is available
     if (!env.img_url) {
         console.log("KV storage not available, returning image directly");
-        return response;  // Directly return image response, terminate execution
+        return fileResponse;  // Directly return image response, terminate execution
     }
 
     // The following code executes only if KV is available
@@ -84,7 +135,7 @@ export async function onRequest(context) {
 
     // Handle based on ListType and Label
     if (metadata.ListType === "White") {
-        return response;
+        return fileResponse;
     } else if (metadata.ListType === "Block" || metadata.Label === "adult") {
         const referer = request.headers.get('Referer');
         const redirectUrl = referer ? "https://static-res.pages.dev/teleimage/img-block-compressed.png" : `${url.origin}/block-img.html`;
@@ -131,12 +182,12 @@ export async function onRequest(context) {
     await env.img_url.put(params.id, "", { metadata });
 
     // Return file content
-    return response;
+    return fileResponse;
 }
 
 async function getFilePath(env, file_id) {
     try {
-        const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${file_id}`;
+        const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${encodeURIComponent(file_id)}`;
         const res = await fetch(url, {
             method: 'GET',
         });
