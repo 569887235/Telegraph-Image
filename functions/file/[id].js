@@ -1,3 +1,19 @@
+const FRIENDLY_FILE_ID_SEPARATOR = "~tg~";
+
+function stripExtension(value = "") {
+    const dotIndex = value.lastIndexOf(".");
+    return dotIndex > 0 ? value.slice(0, dotIndex) : value;
+}
+
+function parseTelegramFileId(pathname = "", paramId = "") {
+    const rawId = decodeURIComponent(paramId || pathname.split("/").filter(Boolean).pop() || "");
+    const idWithoutExtension = stripExtension(rawId);
+    const separatorIndex = idWithoutExtension.lastIndexOf(FRIENDLY_FILE_ID_SEPARATOR);
+    return separatorIndex >= 0
+        ? idWithoutExtension.slice(separatorIndex + FRIENDLY_FILE_ID_SEPARATOR.length)
+        : idWithoutExtension;
+}
+
 export async function onRequest(context) {
     const {
         request,
@@ -6,20 +22,11 @@ export async function onRequest(context) {
     } = context;
 
     const url = new URL(request.url);
+    const telegramFileId = parseTelegramFileId(url.pathname, params.id);
     let fileUrl = 'https://telegra.ph/' + url.pathname + url.search
     if (url.pathname.length > 39) { // Path length > 39 indicates file uploaded via Telegram Bot API
-        const formdata = new FormData();
-        formdata.append("file_id", url.pathname);
-
-        const requestOptions = {
-            method: "POST",
-            body: formdata,
-            redirect: "follow"
-        };
-        // /file/AgACAgEAAxkDAAMDZt1Gzs4W8dQPWiQJxO5YSH5X-gsAAt-sMRuWNelGOSaEM_9lHHgBAAMCAANtAAM2BA.png
-        //get the AgACAgEAAxkDAAMDZt1Gzs4W8dQPWiQJxO5YSH5X-gsAAt-sMRuWNelGOSaEM_9lHHgBAAMCAANtAAM2BA
-        console.log(url.pathname.split(".")[0].split("/")[2])
-        const filePath = await getFilePath(env, url.pathname.split(".")[0].split("/")[2]);
+        console.log(telegramFileId)
+        const filePath = await getFilePath(env, telegramFileId);
         console.log(filePath)
         fileUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
     }
