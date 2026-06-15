@@ -1,4 +1,11 @@
-import { errorHandling, telemetryData } from "./utils/middleware";
+import { errorHandling, getCorsHeaders, jsonResponse, telemetryData } from "./utils/middleware";
+
+export async function onRequestOptions(context) {
+    return new Response(null, {
+        status: 204,
+        headers: getCorsHeaders(context.request, context.env)
+    });
+}
 
 export async function onRequestPost(context) {
     const { request, env } = context;
@@ -63,22 +70,10 @@ export async function onRequestPost(context) {
             });
         }
 
-        return new Response(
-            JSON.stringify([{ 'src': `/file/${fileId}.${fileExtension}` }]),
-            {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' }
-            }
-        );
+        return jsonResponse(context, [{ 'src': '/file/' + fileId + '.' + fileExtension }], { status: 200 });
     } catch (error) {
         console.error('Upload error:', error);
-        return new Response(
-            JSON.stringify({ error: error.message }),
-            {
-                status: 500,
-                headers: { 'Content-Type': 'application/json' }
-            }
-        );
+        return jsonResponse(context, { error: error.message }, { status: 500 });
     }
 }
 

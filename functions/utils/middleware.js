@@ -1,6 +1,111 @@
 import sentryPlugin from "@cloudflare/pages-plugin-sentry";
 import '@sentry/tracing';
 
+const DEFAULT_CORS_METHODS = 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS';
+const DEFAULT_CORS_HEADERS = 'Content-Type, Authorization, X-Requested-With';
+const CORS_ORIGIN_ENV_NAMES = ['CORS_ORIGINS', 'CORS_ORIGIN'];
+
+function getConfiguredCorsOrigins(env) {
+  for (const name of CORS_ORIGIN_ENV_NAMES) {
+    const value = env?.[name];
+    if (typeof value === 'string' && value.trim()) {
+      return value
+        .split(',')
+        .map(origin => origin.trim())
+        .filter(Boolean);
+    }
+  }
+
+  return [];
+}
+
+function normalizeOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function isWildcardSubdomainMatch(origin, allowedOrigin) {
+  if (!allowedOrigin.includes('*.')) return false;
+
+  const normalizedOrigin = normalizeOrigin(origin);
+  const normalizedAllowedOrigin = normalizeOrigin(allowedOrigin);
+  if (!normalizedOrigin || !normalizedAllowedOrigin) return false;
+
+  const originUrl = new URL(normalizedOrigin);
+  const allowedUrl = new URL(normalizedAllowedOrigin);
+  if (originUrl.protocol !== allowedUrl.protocol || originUrl.port !== allowedUrl.port) return false;
+
+  const suffix = allowedUrl.hostname.slice(1).toLowerCase();
+  return originUrl.hostname.toLowerCase().endsWith(suffix) && originUrl.hostname.length > suffix.length;
+}
+
+function isOriginAllowed(origin, allowedOrigins) {
+  if (!origin || allowedOrigins.length === 0) return false;
+  return allowedOrigins.some(allowedOrigin => (
+    allowedOrigin === '*' ||
+    allowedOrigin === origin ||
+    isWildcardSubdomainMatch(origin, allowedOrigin)
+  ));
+}
+
+export function getCorsHeaders(request, env) {
+  const origin = request.headers.get('Origin');
+  const allowedOrigins = getConfiguredCorsOrigins(env);
+
+  if (!isOriginAllowed(origin, allowedOrigins)) {
+    return new Headers();
+  }
+
+  const headers = new Headers();
+  headers.set('Access-Control-Allow-Origin', allowedOrigins.includes('*') ? '*' : origin);
+  headers.set('Access-Control-Allow-Methods', env?.CORS_METHODS || DEFAULT_CORS_METHODS);
+  headers.set(
+    'Access-Control-Allow-Headers',
+    request.headers.get('Access-Control-Request-Headers') || env?.CORS_HEADERS || DEFAULT_CORS_HEADERS
+  );
+  headers.set('Access-Control-Max-Age', env?.CORS_MAX_AGE || '86400');
+  headers.append('Vary', 'Origin');
+
+  if (env?.CORS_ALLOW_CREDENTIALS === 'true' && !allowedOrigins.includes('*')) {
+    headers.set('Access-Control-Allow-Credentials', 'true');
+  }
+
+  return headers;
+}
+
+export async function cors(context) {
+  const headers = getCorsHeaders(context.request, context.env);
+
+  if (context.request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers });
+  }
+
+  const response = await context.next();
+  const responseHeaders = new Headers(response.headers);
+  headers.forEach((value, key) => responseHeaders.set(key, value));
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders
+  });
+}
+
+export function jsonResponse(context, body, init = {}) {
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', headers.get('Content-Type') || 'application/json');
+  getCorsHeaders(context.request, context.env).forEach((value, key) => headers.set(key, value));
+
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers
+  });
+}
+
 export async function errorHandling(context) {
   const env = context.env;
   if (typeof env.disable_telemetry == "undefined" || env.disable_telemetry == null || env.disable_telemetry == "") {

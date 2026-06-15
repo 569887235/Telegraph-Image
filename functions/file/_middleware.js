@@ -1,3 +1,3 @@
-import { errorHandling, telemetryData } from '../utils/middleware';
+import { cors, errorHandling, telemetryData } from '../utils/middleware';
 
-export const onRequest = [errorHandling, telemetryData];
+export const onRequest = [cors, errorHandling, telemetryData];
