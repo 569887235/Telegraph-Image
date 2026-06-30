@@ -249,30 +249,20 @@ function parseTelegramAccounts(env) {
     }
 }
 
+function availableTelegramAccountKeys(env) {
+    return Object.keys(parseTelegramAccounts(env));
+}
+
 function resolveTelegramAccount(env, accountKey) {
     const accounts = parseTelegramAccounts(env);
     const account = accounts[accountKey];
-    if (account && typeof account === "object") {
-        const botTokenEnv = String(account.botTokenEnv || "").trim();
-        const botToken = account.botToken || (botTokenEnv ? env[botTokenEnv] : "");
-        if (botToken) {
-            return {
-                accountKey,
-                botToken: String(botToken),
-                chatId: account.chatId ? String(account.chatId) : ""
-            };
-        }
-    }
+    if (!account || typeof account !== "object" || !account.botToken) return null;
 
-    if (accountKey === defaultStorageAccountKey(env) && env.TG_Bot_Token) {
-        return {
-            accountKey,
-            botToken: String(env.TG_Bot_Token),
-            chatId: env.TG_Chat_ID ? String(env.TG_Chat_ID) : ""
-        };
-    }
-
-    return null;
+    return {
+        accountKey,
+        botToken: String(account.botToken),
+        chatId: account.chatId ? String(account.chatId) : ""
+    };
 }
 
 function isTelegramFileAccess(access) {
@@ -295,7 +285,11 @@ export async function onRequest(context) {
     let fileUrl = "https://telegra.ph" + access.pathname + url.search;
     if (isTelegramFileAccess(access)) {
         const telegramAccount = resolveTelegramAccount(env, access.accountKey);
-        if (!telegramAccount) return new Response("Unknown Telegram storage account", { status: 404 });
+        if (!telegramAccount) {
+            const availableKeys = availableTelegramAccountKeys(env).join(", ") || "none";
+            console.error("Unknown Telegram storage account:", access.accountKey, "available:", availableKeys);
+            return new Response("Unknown Telegram storage account: " + access.accountKey + " (available: " + availableKeys + ")", { status: 404 });
+        }
 
         const filePath = await getFilePath(telegramAccount.botToken, telegramFileId);
         if (!filePath) return new Response("Telegram file path not found", { status: 502 });
