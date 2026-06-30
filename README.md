@@ -36,6 +36,7 @@ Finally, go to the Cloudflare Pages backend to set the relevant environment vari
 |---------------------|---------------------------|----------------------------------------------------------------------------------------|
 | `TG_ACCOUNTS_JSON`  | `{"main":{"botToken":"123468:AAxxxGKrn5","chatId":"-1234567"}}` | Top-level JSON object keyed by storage account key. Each account must include `botToken` and `chatId`. |
 | `DEFAULT_STORAGE_ACCOUNT_KEY` | `main` | Optional default account used by `/upload` and legacy `/file/{token}.{ext}` links; defaults to `main`. |
+| `REDIRECT_URL` | `https://example.com/` | Optional page redirect target. When set, HTML page requests redirect to this URL; upload, file, API, and static asset paths continue to work normally. |
 
 ## How to Deploy
 

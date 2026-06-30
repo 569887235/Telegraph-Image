@@ -36,6 +36,7 @@
 |-----------------|---------------------------|----------------------------------------------------------------------------------------|
 | `TG_ACCOUNTS_JSON` | `{"main":{"botToken":"123468:AAxxxGKrn5","chatId":"-1234567"}}` | 顶层 JSON 对象，key 为存储账号标记；每个账号必须包含 `botToken` 和 `chatId`。 |
 | `DEFAULT_STORAGE_ACCOUNT_KEY` | `main` | 可选默认账号，用于 `/upload` 和旧格式 `/file/{token}.{ext}` 链接；默认 `main`。 |
+| `REDIRECT_URL` | `https://example.com/` | 可选页面重定向目标。设置后，HTML 页面访问会重定向到该地址；上传、文件、API 和静态资源路径保持正常访问。 |
 
 ## 如何部署
 
