@@ -1,5 +1,48 @@
 import { errorHandling, getCorsHeaders, jsonResponse, telemetryData } from "./utils/middleware";
 
+function defaultStorageAccountKey(env) {
+    return String(env.DEFAULT_STORAGE_ACCOUNT_KEY || "main").trim() || "main";
+}
+
+function parseTelegramAccounts(env) {
+    const raw = String(env.TG_ACCOUNTS_JSON || "").trim();
+    if (!raw) return {};
+
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+        console.error("Invalid TG_ACCOUNTS_JSON:", error.message);
+        return {};
+    }
+}
+
+function availableTelegramAccountKeys(env) {
+    return Object.keys(parseTelegramAccounts(env));
+}
+
+function resolveTelegramAccount(env, accountKey) {
+    const accounts = parseTelegramAccounts(env);
+    const account = accounts[accountKey];
+    if (!account || typeof account !== "object" || !account.botToken || !account.chatId) return null;
+
+    return {
+        accountKey,
+        botToken: String(account.botToken),
+        chatId: String(account.chatId)
+    };
+}
+
+function uploadAccountKey({ env, request, formData }) {
+    const url = new URL(request.url);
+    const input = formData.get("accountKey") || formData.get("account") || url.searchParams.get("accountKey") || url.searchParams.get("account");
+    return String(input || defaultStorageAccountKey(env)).trim() || defaultStorageAccountKey(env);
+}
+
+function fileAccessPath(accountKey, fileId, fileExtension) {
+    return "/file/" + encodeURIComponent(accountKey) + "/" + encodeURIComponent(fileId + "." + fileExtension);
+}
+
 export async function onRequestOptions(context) {
     return new Response(null, {
         status: 204,
@@ -22,11 +65,18 @@ export async function onRequestPost(context) {
             throw new Error('No file uploaded');
         }
 
+        const accountKey = uploadAccountKey({ env, request, formData });
+        const telegramAccount = resolveTelegramAccount(env, accountKey);
+        if (!telegramAccount) {
+            const availableKeys = availableTelegramAccountKeys(env).join(", ") || "none";
+            throw new Error("Unknown Telegram storage account: " + accountKey + " (available: " + availableKeys + ")");
+        }
+
         const fileName = uploadFile.name;
         const fileExtension = fileName.split('.').pop().toLowerCase();
 
         const telegramFormData = new FormData();
-        telegramFormData.append("chat_id", env.TG_Chat_ID);
+        telegramFormData.append("chat_id", telegramAccount.chatId);
 
         // 根据文件类型选择合适的上传方式
         let apiEndpoint;
@@ -44,7 +94,7 @@ export async function onRequestPost(context) {
             apiEndpoint = 'sendDocument';
         }
 
-        const result = await sendToTelegram(telegramFormData, apiEndpoint, env);
+        const result = await sendToTelegram(telegramFormData, apiEndpoint, telegramAccount.botToken);
 
         if (!result.success) {
             throw new Error(result.error);
@@ -56,21 +106,7 @@ export async function onRequestPost(context) {
             throw new Error('Failed to get file ID');
         }
 
-        // 将文件信息保存到 KV 存储
-        if (env.img_url) {
-            await env.img_url.put(`${fileId}.${fileExtension}`, "", {
-                metadata: {
-                    TimeStamp: Date.now(),
-                    ListType: "None",
-                    Label: "None",
-                    liked: false,
-                    fileName: fileName,
-                    fileSize: uploadFile.size,
-                }
-            });
-        }
-
-        return jsonResponse(context, [{ 'src': '/file/' + fileId + '.' + fileExtension }], { status: 200 });
+        return jsonResponse(context, [{ 'src': fileAccessPath(accountKey, fileId, fileExtension) }], { status: 200 });
     } catch (error) {
         console.error('Upload error:', error);
         return jsonResponse(context, { error: error.message }, { status: 500 });
@@ -93,9 +129,9 @@ function getFileId(response) {
     return null;
 }
 
-async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
+async function sendToTelegram(formData, apiEndpoint, botToken, retryCount = 0) {
     const MAX_RETRIES = 2;
-    const apiUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/${apiEndpoint}`;
+    const apiUrl = `https://api.telegram.org/bot${botToken}/${apiEndpoint}`;
 
     try {
         const response = await fetch(apiUrl, { method: "POST", body: formData });
@@ -111,7 +147,7 @@ async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
             const newFormData = new FormData();
             newFormData.append('chat_id', formData.get('chat_id'));
             newFormData.append('document', formData.get('photo'));
-            return await sendToTelegram(newFormData, 'sendDocument', env, retryCount + 1);
+            return await sendToTelegram(newFormData, 'sendDocument', botToken, retryCount + 1);
         }
 
         return {
@@ -122,7 +158,7 @@ async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
         console.error('Network error:', error);
         if (retryCount < MAX_RETRIES) {
             await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
-            return await sendToTelegram(formData, apiEndpoint, env, retryCount + 1);
+            return await sendToTelegram(formData, apiEndpoint, botToken, retryCount + 1);
         }
         return { success: false, error: 'Network error occurred' };
     }
