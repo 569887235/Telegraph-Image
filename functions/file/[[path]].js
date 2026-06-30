@@ -24,6 +24,39 @@ function encodePathValue(value = "") {
     return encodeURIComponent(value).replace(/%2F/gi, "%252F");
 }
 
+function paramPathSegments(params = {}, pathname = "") {
+    const rawPath = params.path ?? params.id ?? pathname.replace(/^\/file\/?/, "");
+    const values = Array.isArray(rawPath) ? rawPath : String(rawPath || "").split("/");
+    return values.filter(Boolean).map(decodePathValue);
+}
+
+function defaultStorageAccountKey(env) {
+    return String(env.DEFAULT_STORAGE_ACCOUNT_KEY || "main").trim() || "main";
+}
+
+function parseRequestPath({ env, params, pathname }) {
+    const segments = paramPathSegments(params, pathname);
+    if (segments.length <= 1) {
+        return {
+            accountKey: defaultStorageAccountKey(env),
+            rawId: segments[0] || "",
+            hasExplicitAccountKey: false
+        };
+    }
+
+    return {
+        accountKey: segments[0],
+        rawId: segments.slice(1).join("/"),
+        hasExplicitAccountKey: true
+    };
+}
+
+function accountPath(accountKey, paramId, hasExplicitAccountKey) {
+    const encodedId = encodePathValue(paramId);
+    if (!hasExplicitAccountKey) return "/file/" + encodedId;
+    return "/file/" + encodePathValue(accountKey) + "/" + encodedId;
+}
+
 function base64UrlToBytes(value = "") {
     const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
     const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
@@ -70,35 +103,62 @@ async function decryptFileAccessId(value, secret) {
     }
 }
 
+function splitAccountScopedFileId(value = "") {
+    const separatorIndex = value.indexOf(":");
+    if (separatorIndex <= 0) {
+        return { accountKey: null, fileId: value };
+    }
+
+    return {
+        accountKey: value.slice(0, separatorIndex),
+        fileId: value.slice(separatorIndex + 1)
+    };
+}
+
 async function resolveRequestFileId({ env, params, pathname }) {
-    const rawId = decodePathValue(params.id || pathname.split("/").filter(Boolean).pop() || "");
+    const parsedPath = parseRequestPath({ env, params, pathname });
+    const rawId = parsedPath.rawId;
     const extension = fileExtension(rawId);
     const secret = (env.FILE_ACCESS_SECRET || "").trim();
+
     if (!secret || extension === "ts") {
+        const publicPathname = accountPath(parsedPath.accountKey, rawId, parsedPath.hasExplicitAccountKey);
         return {
+            accountKey: parsedPath.accountKey,
             paramId: rawId,
-            pathname,
+            pathname: publicPathname,
             protected: Boolean(secret),
-            extension
+            extension,
+            hasExplicitAccountKey: parsedPath.hasExplicitAccountKey,
+            kvKey: parsedPath.hasExplicitAccountKey ? parsedPath.accountKey + "/" + rawId : rawId
         };
     }
 
     const decrypted = await decryptFileAccessId(stripExtension(rawId), secret);
     if (!decrypted) return null;
+
+    const scopedFile = splitAccountScopedFileId(decrypted);
+    if (scopedFile.accountKey && scopedFile.accountKey !== parsedPath.accountKey) {
+        return null;
+    }
+
+    const decryptedId = scopedFile.fileId;
     const suffix = extension ? "." + extension : "";
-    const paramId = decrypted + suffix;
-    const pathnameParts = pathname.split("/");
-    pathnameParts[pathnameParts.length - 1] = encodePathValue(paramId);
+    const paramId = decryptedId + suffix;
+    const publicPathname = accountPath(parsedPath.accountKey, paramId, parsedPath.hasExplicitAccountKey);
     return {
+        accountKey: parsedPath.accountKey,
         paramId,
-        pathname: pathnameParts.join("/"),
+        pathname: publicPathname,
         protected: true,
-        extension
+        extension,
+        hasExplicitAccountKey: parsedPath.hasExplicitAccountKey,
+        kvKey: parsedPath.hasExplicitAccountKey ? parsedPath.accountKey + "/" + paramId : paramId
     };
 }
 
-function parseTelegramFileId(pathname = "", paramId = "") {
-    const rawId = decodePathValue(paramId || pathname.split("/").filter(Boolean).pop() || "");
+function parseTelegramFileId(paramId = "") {
+    const rawId = decodePathValue(paramId);
     const idWithoutExtension = stripExtension(rawId);
     const separatorIndex = idWithoutExtension.lastIndexOf(FRIENDLY_FILE_ID_SEPARATOR);
     return separatorIndex >= 0
@@ -114,8 +174,8 @@ function sanitizeFileName(value = "") {
     return fileName || null;
 }
 
-function friendlyDownloadFileName(pathname = "", paramId = "") {
-    const rawId = decodePathValue(paramId || pathname.split("/").filter(Boolean).pop() || "");
+function friendlyDownloadFileName(paramId = "") {
+    const rawId = decodePathValue(paramId);
     const idWithoutExtension = stripExtension(rawId);
     const separatorIndex = idWithoutExtension.lastIndexOf(FRIENDLY_FILE_ID_SEPARATOR);
     if (separatorIndex <= 0) return null;
@@ -131,7 +191,7 @@ function contentDispositionHeader(response, fileName) {
     const dispositionType = current.split(";")[0].trim().toLowerCase() || "inline";
     const safeType = /^[a-z]+$/.test(dispositionType) ? dispositionType : "inline";
     const asciiName = fileName.replace(/[^\x20-\x7e]/g, "_").replace(/\\/g, "\\\\").replace(/"/g, "_");
-    return safeType + `; filename="${asciiName}"; filename*=UTF-8''` + encodeURIComponent(fileName);
+    return safeType + "; filename=\"" + asciiName + "\"; filename*=UTF-8''" + encodeURIComponent(fileName);
 }
 
 function withFriendlyDownloadName(response, fileName) {
@@ -176,6 +236,49 @@ async function withProtectedHlsManifest(response, access) {
     });
 }
 
+function parseTelegramAccounts(env) {
+    const raw = String(env.TG_ACCOUNTS_JSON || "").trim();
+    if (!raw) return {};
+
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+        console.error("Invalid TG_ACCOUNTS_JSON:", error.message);
+        return {};
+    }
+}
+
+function resolveTelegramAccount(env, accountKey) {
+    const accounts = parseTelegramAccounts(env);
+    const account = accounts[accountKey];
+    if (account && typeof account === "object") {
+        const botTokenEnv = String(account.botTokenEnv || "").trim();
+        const botToken = account.botToken || (botTokenEnv ? env[botTokenEnv] : "");
+        if (botToken) {
+            return {
+                accountKey,
+                botToken: String(botToken),
+                chatId: account.chatId ? String(account.chatId) : ""
+            };
+        }
+    }
+
+    if (accountKey === defaultStorageAccountKey(env) && env.TG_Bot_Token) {
+        return {
+            accountKey,
+            botToken: String(env.TG_Bot_Token),
+            chatId: env.TG_Chat_ID ? String(env.TG_Chat_ID) : ""
+        };
+    }
+
+    return null;
+}
+
+function isTelegramFileAccess(access) {
+    return access.paramId.length > 39 || access.hasExplicitAccountKey;
+}
+
 export async function onRequest(context) {
     const {
         request,
@@ -187,14 +290,17 @@ export async function onRequest(context) {
     const access = await resolveRequestFileId({ env, params, pathname: url.pathname });
     if (!access) return new Response("Invalid file access token", { status: 403 });
 
-    const telegramFileId = parseTelegramFileId(access.pathname, access.paramId);
-    const downloadFileName = friendlyDownloadFileName(access.pathname, access.paramId);
-    let fileUrl = 'https://telegra.ph/' + access.pathname + url.search
-    if (access.pathname.length > 39) { // Path length > 39 indicates file uploaded via Telegram Bot API
-        console.log(telegramFileId)
-        const filePath = await getFilePath(env, telegramFileId);
-        console.log(filePath)
-        fileUrl = `https://api.telegram.org/file/bot${env.TG_Bot_Token}/${filePath}`;
+    const telegramFileId = parseTelegramFileId(access.paramId);
+    const downloadFileName = friendlyDownloadFileName(access.paramId);
+    let fileUrl = "https://telegra.ph" + access.pathname + url.search;
+    if (isTelegramFileAccess(access)) {
+        const telegramAccount = resolveTelegramAccount(env, access.accountKey);
+        if (!telegramAccount) return new Response("Unknown Telegram storage account", { status: 404 });
+
+        const filePath = await getFilePath(telegramAccount.botToken, telegramFileId);
+        if (!filePath) return new Response("Telegram file path not found", { status: 502 });
+
+        fileUrl = "https://api.telegram.org/file/bot" + telegramAccount.botToken + "/" + filePath;
     }
 
     const response = await fetch(fileUrl, {
@@ -211,7 +317,7 @@ export async function onRequest(context) {
     const fileResponse = withFriendlyDownloadName(response, downloadFileName);
 
     // Allow the admin page to directly view the image
-    const isAdmin = request.headers.get('Referer')?.includes(`${url.origin}/admin`);
+    const isAdmin = request.headers.get('Referer')?.includes(url.origin + "/admin");
     if (isAdmin) {
         return withProtectedHlsManifest(fileResponse, access);
     }
@@ -223,7 +329,7 @@ export async function onRequest(context) {
     }
 
     // The following code executes only if KV is available
-    let record = await env.img_url.getWithMetadata(access.paramId);
+    let record = await env.img_url.getWithMetadata(access.kvKey);
     if (!record || !record.metadata) {
         // Initialize metadata if it doesn't exist
         console.log("Metadata not found, initializing...");
@@ -237,7 +343,7 @@ export async function onRequest(context) {
                 fileSize: 0,
             }
         };
-        await env.img_url.put(access.paramId, "", { metadata: record.metadata });
+        await env.img_url.put(access.kvKey, "", { metadata: record.metadata });
     }
 
     const metadata = {
@@ -254,20 +360,20 @@ export async function onRequest(context) {
         return withProtectedHlsManifest(fileResponse, access);
     } else if (metadata.ListType === "Block" || metadata.Label === "adult") {
         const referer = request.headers.get('Referer');
-        const redirectUrl = referer ? "https://static-res.pages.dev/teleimage/img-block-compressed.png" : `${url.origin}/block-img.html`;
+        const redirectUrl = referer ? "https://static-res.pages.dev/teleimage/img-block-compressed.png" : url.origin + "/block-img.html";
         return Response.redirect(redirectUrl, 302);
     }
 
     // Check if WhiteList_Mode is enabled
     if (env.WhiteList_Mode === "true") {
-        return Response.redirect(`${url.origin}/whitelist-on.html`, 302);
+        return Response.redirect(url.origin + "/whitelist-on.html", 302);
     }
 
     // If no metadata or further actions required, moderate content and add to KV if needed
     if (env.ModerateContentApiKey) {
         try {
             console.log("Starting content moderation...");
-            const moderateUrl = `https://api.moderatecontent.com/moderate/?key=${env.ModerateContentApiKey}&url=https://telegra.ph${access.pathname}${url.search}`;
+            const moderateUrl = "https://api.moderatecontent.com/moderate/?key=" + env.ModerateContentApiKey + "&url=https://telegra.ph" + access.pathname + url.search;
             const moderateResponse = await fetch(moderateUrl);
 
             if (!moderateResponse.ok) {
@@ -281,8 +387,8 @@ export async function onRequest(context) {
 
                     if (moderateData.rating_label === "adult") {
                         console.log("Content marked as adult, saving metadata and redirecting");
-                        await env.img_url.put(access.paramId, "", { metadata });
-                        return Response.redirect(`${url.origin}/block-img.html`, 302);
+                        await env.img_url.put(access.kvKey, "", { metadata });
+                        return Response.redirect(url.origin + "/block-img.html", 302);
                     }
                 }
             }
@@ -295,21 +401,21 @@ export async function onRequest(context) {
     // Only save metadata if content is not adult content
     // Adult content cases are already handled above and will not reach this point
     console.log("Saving metadata");
-    await env.img_url.put(access.paramId, "", { metadata });
+    await env.img_url.put(access.kvKey, "", { metadata });
 
     // Return file content
     return withProtectedHlsManifest(fileResponse, access);
 }
 
-async function getFilePath(env, file_id) {
+async function getFilePath(botToken, file_id) {
     try {
-        const url = `https://api.telegram.org/bot${env.TG_Bot_Token}/getFile?file_id=${encodeURIComponent(file_id)}`;
+        const url = "https://api.telegram.org/bot" + botToken + "/getFile?file_id=" + encodeURIComponent(file_id);
         const res = await fetch(url, {
             method: 'GET',
         });
 
         if (!res.ok) {
-            console.error(`HTTP error! status: ${res.status}`);
+            console.error("HTTP error! status: " + res.status);
             return null;
         }
 
