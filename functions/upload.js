@@ -1,5 +1,8 @@
 import { errorHandling, getCorsHeaders, jsonResponse, telemetryData } from "./utils/middleware";
 
+const FILE_ACCESS_KEY_PREFIX = "telegraph-img:file-access:key:";
+const FILE_ACCESS_IV_PREFIX = "telegraph-img:file-access:iv:";
+
 function defaultStorageAccountKey(env) {
     return String(env.DEFAULT_STORAGE_ACCOUNT_KEY || "main").trim() || "main";
 }
@@ -37,6 +40,47 @@ function uploadAccountKey({ env, request, formData }) {
     const url = new URL(request.url);
     const input = formData.get("accountKey") || formData.get("account") || url.searchParams.get("accountKey") || url.searchParams.get("account");
     return String(input || defaultStorageAccountKey(env)).trim() || defaultStorageAccountKey(env);
+}
+
+function bytesToBase64Url(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function sha256Bytes(value) {
+    const data = typeof value === "string" ? new TextEncoder().encode(value) : value;
+    return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+}
+
+async function fileAccessKey(secret) {
+    const keyBytes = await sha256Bytes(FILE_ACCESS_KEY_PREFIX + secret);
+    return crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]);
+}
+
+async function fileAccessIv(secret, value) {
+    const digest = await sha256Bytes(FILE_ACCESS_IV_PREFIX + secret + "\0" + value);
+    return digest.slice(0, 12);
+}
+
+async function encryptFileAccessId(value, secret) {
+    if (!secret || !value) return value;
+    const iv = await fileAccessIv(secret, value);
+    const encrypted = new Uint8Array(await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv },
+        await fileAccessKey(secret),
+        new TextEncoder().encode(value)
+    ));
+    const token = new Uint8Array(iv.length + encrypted.length);
+    token.set(iv);
+    token.set(encrypted, iv.length);
+    return bytesToBase64Url(token);
+}
+
+async function publicFileId(env, accountKey, fileId) {
+    const secret = String(env.FILE_ACCESS_SECRET || "").trim();
+    if (!secret) return fileId;
+    return encryptFileAccessId(accountKey + ":" + fileId, secret);
 }
 
 function fileAccessPath(accountKey, fileId, fileExtension) {
@@ -106,7 +150,8 @@ export async function onRequestPost(context) {
             throw new Error('Failed to get file ID');
         }
 
-        return jsonResponse(context, [{ 'src': fileAccessPath(accountKey, fileId, fileExtension) }], { status: 200 });
+        const accessFileId = await publicFileId(env, accountKey, fileId);
+        return jsonResponse(context, [{ 'src': fileAccessPath(accountKey, accessFileId, fileExtension) }], { status: 200 });
     } catch (error) {
         console.error('Upload error:', error);
         return jsonResponse(context, { error: error.message }, { status: 500 });
